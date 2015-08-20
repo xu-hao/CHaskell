@@ -1,4 +1,4 @@
-module HTC where
+module CHaskell where
 
 import Language.Haskell.Parser
 import Language.Haskell.Syntax
