@@ -1,15 +1,12 @@
 module Antlr where
 
-import Prelude hiding (intercalate, sum)
+import Prelude hiding (sum)
 import Data.List hiding (intercalate, sum)
 
 data Expr = Var {unVar :: String} | BinOp {left :: Expr, op :: String, right :: Expr} | ListOp {op :: String, args :: [Expr]}
 
 data ExprCon = VarCon String | BinOpCon ExprCon String ExprCon | ListOpCon String [ExprCon]
 
-map :: (a->b) -> [a] -> [b]
-foldl :: (b->a->b)-> b-> [a]->b
-foldl1 :: (a->a->a) -> [a] -> a
 
 intercalate :: [a] -> [[a]] -> [a]
 intercalate sep = foldl1 (\a b -> a ++ sep ++ b)

@@ -17,9 +17,9 @@ data Type = TAuto
           | TCon String
           | TVar String
           | TApp String [Type]
-          | TFun [Type] Type [Type]
+          | TFun [Type] Type [Type] deriving Eq
 data Param = Param Type String
-data FuncSig = FuncSig Type String [Param]
+data FuncSig = FuncSig Type String [Param] [String]
 data Expr = This
           | Dot Expr String
           | Deref Expr
@@ -39,7 +39,9 @@ data Init = Init String Expr
 data Member = Field Type String
             | Ctor String String [Param] [Init] Block
             | TemplateMember Template
-data Def = StructDef String [Member]
+data Inherit = Public Type
+             | Private Type
+data Def = StructDef String [Inherit] [Member]
          | StructFwdDecl String
          | Typedef Type String
          | FuncDef FuncSig Block
@@ -53,31 +55,36 @@ class ShowI a where
 
 instance ShowI Type where
     showI (TAuto) = return "auto"
-    showI (TVar t) = return t
+    showI (TVar t) = return $ "T" ++ t
     showI (TCon t) = return t
     showI (TApp t targs) = do
         targss <- mapM showI targs
         return $ t ++ "<" ++ intercalate "," targss ++ " >"
     showI (TFun vns rt pts) = do
-        targss <- mapM showI pts
+        targss <- map (\t-> "const " ++ t ++ "&") <$> mapM showI pts
         rts <- showI rt
         return $ "std::function<"++rts ++ "("++ intercalate "," targss ++ ")>"
 instance ShowI Param where
     showI (Param t n) = do
         ts <- showI t
-        return $ ts ++ " " ++ n
+        return $ "const " ++ ts ++ "& " ++ n
+instance ShowI Inherit where
+    showI (Public t) = ("public " ++) <$> showI t
+    showI (Private t) = ("private " ++) <$> showI t
+
 instance ShowI Def where
     showI (FuncDef sig block) = do
         i <- get
         sigs <- showI sig
         blocks <- showI block
         return $ i ++ sigs ++ blocks ++ "\n"
-    showI (StructDef n members) = do
+    showI (StructDef n inherits members) = do
         i <- get
         put ("\t" ++ i)
         memberss <- concat <$> mapM showI members
+        inheritss <- mapM showI inherits
         put i
-        return $ i ++ "struct " ++ n ++ "{\n" ++ memberss ++ "};\n"
+        return $ i ++ "struct " ++ n ++ (if L.null inherits then "" else ":" ++ intercalate "," inheritss) ++ "{\n" ++ memberss ++ i ++ "};\n"
     showI (StructFwdDecl n) = do
         i <- get
         return $ i ++ "struct " ++ n ++ ";\n"
@@ -90,10 +97,10 @@ instance ShowI Def where
         sigs <- showI sig
         return $ i++ sigs++";\n"
 instance ShowI FuncSig where
-    showI (FuncSig t n ps) = do
+    showI (FuncSig t n ps postmods) = do
         ts<-showI t
         pss <- mapM showI ps
-        return $ ts ++ " " ++ n ++ "(" ++ intercalate "," pss ++ ")"
+        return $ ts ++ " " ++ n ++ "(" ++ intercalate "," pss ++ ")"++ unwords postmods
 instance ShowI Init where
     showI (Init n v) = do
         vs <- showI v
@@ -171,7 +178,7 @@ instance ShowI Template where
         i<-get
         tvss <- mapM showI tvs
         defs <- showI def
-        return $ i ++ "template <" ++ intercalate "," tvss ++ " >\n" ++ defs
+        return $ i ++ "template <" ++ intercalate "," (map ("typename " ++) tvss) ++ " >\n" ++ defs
     showI (NoTemplate def) = showI def
 
 showII a = evalState (showI a) ""
@@ -202,7 +209,7 @@ tranlateHaskellTypeToCPlusPlus ty = error (show ty)
 translateHaskellExprToCPlusPlus :: HsExp -> TranEnv Expr
 translateHaskellExprToCPlusPlus (HsCon n) = return $ Con (extractQName n)
 translateHaskellExprToCPlusPlus (HsVar n) = return $ Var (extractQName n)
-translateHaskellExprToCPlusPlus (HsLit (HsString s)) = return $ StrL s
+translateHaskellExprToCPlusPlus (HsLit (HsString s)) = return $ App (Con "std::string") [StrL s]
 translateHaskellExprToCPlusPlus (HsLit (HsInt i)) = return $ IntL (fromIntegral i)
 translateHaskellExprToCPlusPlus (HsInfixApp exp1 op exp2) = App (Con (extractQOp op)) <$> mapM translateHaskellExprToCPlusPlus [exp1, exp2]
 translateHaskellExprToCPlusPlus (HsApp exp1 exp2) = do
@@ -220,16 +227,19 @@ translateHaskellExprToCPlusPlus (HsApp exp1 exp2) = do
           let ft@(TFun _ rt pts) = typedic ! n
           if length pts /= length args
               then error "partial application"
-              else return $ App expr args
+              else App expr <$> mapM wrapArg args
+      wrapArg arg@(Var v) = do
+          typedic <- lift get
+          return $ case lookup v typedic of
+              Just t@(TFun _ _ _) -> App (Con "chaskell::function") [arg]
+              _ -> arg
+      wrapArg arg = return arg
 translateHaskellExprToCPlusPlus (HsLambda _ pats exp) = do
     let vars = map (extractName . (\(HsPVar n) -> n)) pats
     Lam vars <$> Block <$> sequence [Return <$> translateHaskellExprToCPlusPlus exp]
 translateHaskellExprToCPlusPlus (HsLet decls exp) = error "let is not supported"
 translateHaskellExprToCPlusPlus (HsIf exp1 exp2 exp3) = If <$> translateHaskellExprToCPlusPlus exp1 <*> translateHaskellExprToCPlusPlus exp2 <*> translateHaskellExprToCPlusPlus exp3
-translateHaskellExprToCPlusPlus (HsCase exp alts) = do
-    stmts <- translateHaskellAltsToLambdaCPlusPlus alts
-    stmt <- translateHaskellExprToCPlusPlus exp
-    return $ App (Con "boost::apply_visitor") (stmts ++ [stmt])
+translateHaskellExprToCPlusPlus (HsCase exp alts) = error "not supported"
 translateHaskellExprToCPlusPlus (HsDo stmts) = error "not supported"
 translateHaskellExprToCPlusPlus (HsTuple exps) = App (Con "std::make_tuple") <$> mapM translateHaskellExprToCPlusPlus exps
 translateHaskellExprToCPlusPlus (HsList exps) = InitApp "std::vector" <$> mapM translateHaskellExprToCPlusPlus exps
@@ -239,10 +249,11 @@ type DataDic = Map String (Int, [String])
 type TypeDic = Map String Type
 type TranEnv = StateT DataDic (State TypeDic)
 
-translateHaskellAltsToLambdaCPlusPlus :: Pattern p => [p] -> TranEnv [Expr]
-translateHaskellAltsToLambdaCPlusPlus alts = do
+translateHaskellAltsToCPlusPlus :: Pattern p => Type -> [p] -> TranEnv Def
+translateHaskellAltsToCPlusPlus rt alts = do
     alts' <- sortAlts alts
-    mapM translateHaskellAltToLambdaCPlusPlus alts
+    fdefs <- mapM (translateHaskellAltToCPlusPlus rt) alts
+    return $ StructDef "visitor"  [Public (TApp "boost::static_visitor" [rt])] (map TemplateMember fdefs)
 
 sortAlts :: Pattern p => [p] -> TranEnv [p]
 sortAlts alts = do
@@ -254,9 +265,10 @@ sortAlts alts = do
             (i2, _) = datadic ! cons2 in
             compare i1 i2) alts)
 
-translateHaskellAltToLambdaCPlusPlus :: Pattern p => p -> TranEnv Expr
-translateHaskellAltToLambdaCPlusPlus p =
-    Lam ["_var"] <$> Block <$> ((++) <$> translateHaskellPatternToStmtsCpp (Var "_var") (extractPat p)<*> sequence [Return <$> translateHaskellExprToCPlusPlus (extractExp p)])
+translateHaskellAltToCPlusPlus :: Pattern p => Type -> p -> TranEnv Template
+translateHaskellAltToCPlusPlus rt p = do
+    let cons = extractCons p
+    NoTemplate <$> (FuncDef (FuncSig rt "operator()" [Param (TCon cons) "_var"] ["const"]) <$> Block <$> ((++) <$> translateHaskellPatternToStmtsCpp (Var "_var") (extractPat p)<*> sequence [Return <$> translateHaskellExprToCPlusPlus (extractExp p)]))
 
 translateHaskellPatternToStmtsCpp :: Expr -> HsPat -> TranEnv [Stmt]
 translateHaskellPatternToStmtsCpp e (HsPVar n) = return [DefAssign TAuto (Var (extractName n)) e]
@@ -272,14 +284,18 @@ class Pattern a where
     extractCons :: a -> String
     extractPat :: a -> HsPat
     extractExp :: a -> HsExp
+    extractCons = extractCons . extractPat
 instance Pattern HsMatch where
-    extractCons (HsMatch _ _ (HsPApp n _ : _) _ _) = extractQName n
     extractPat (HsMatch _ _ (pat : _) _ _) = pat
     extractExp (HsMatch _ _ _ (HsUnGuardedRhs exp) _) = exp
 instance Pattern HsAlt where
-    extractCons (HsAlt _ (HsPApp n _) _ _) = extractQName n
     extractPat (HsAlt _ pat _ _) = pat
     extractExp (HsAlt _ _ (HsUnGuardedAlt exp) _) = exp
+instance Pattern HsPat where
+    extractCons (HsPApp n _) = extractQName n
+    extractCons (HsPParen pat) = extractCons pat
+    extractPat = error . show
+    extractExp = error . show
 
 extractParams (HsMatch _ _ pats _ _) = zipWith extractParamFromPat pats  [1..length pats]
 
@@ -313,7 +329,13 @@ extractConstructorInit (name, _) = Init (mname name) (App (Var "std::move") [Var
 
 variant :: [Type] -> Type
 variant types = "boost::variant" @@ map (("boost::recursive_wrapper" @@) . return) types
-
+withTypes :: [(String, Type)] -> TranEnv a -> TranEnv a
+withTypes ts a = do
+    typedic <- lift get
+    lift $ put (fromList ts `union` typedic)
+    r <- a
+    lift $ put typedic
+    return r
 tranlateHaskellToHPlusPlus :: HsModule -> TranEnv Prog
 tranlateHaskellToHPlusPlus (HsModule _ _ _ _ decls) =
     Prog ["\"chaskell.hpp\"", "<string>", "<vector>", "<utility>", "<boost/variant.hpp>"] <$>
@@ -345,7 +367,7 @@ tranlateHaskellDeclsToHPlusPlus (HsTypeSig _ [n] (HsQualType _ ty)) = do
     let fn = extractName n
     let ft@(TFun vns rt pt) = tranlateHaskellTypeToCPlusPlus ty
     lift $ put $ insert fn ft typedic
-    let fundef = FuncProto $ FuncSig rt fn $ map (\ty -> Param ty "") pt
+    let fundef = FuncProto $ FuncSig rt fn (map (\ty -> Param ty "") pt) []
     return [if L.null vns
         then NoTemplate fundef
         else Template vns fundef
@@ -355,7 +377,7 @@ tranlateHaskellDeclsToHPlusPlus (HsForeignImport _ _ _ _ n ty) = do
     let fn = extractName n
     let ft@(TFun vns rt pt) = tranlateHaskellTypeToCPlusPlus ty
     lift $ put $ insert fn ft typedic
-    let fundef = FuncProto $ FuncSig rt fn $ map (\ty -> Param ty "") pt
+    let fundef = FuncProto $ FuncSig rt fn (map (\ty -> Param ty "") pt) []
     return [if L.null vns
         then NoTemplate fundef
         else Template vns fundef
@@ -371,8 +393,8 @@ tranlateHaskellDeclsToCPlusPlus (HsPatBind _ (HsPVar n) (HsUnGuardedRhs exp) _) 
     let extra = map (HsVar . UnQual . HsIdent . ("_param" ++) . show) [1 .. ptsl]
     let extraps = map ( ("_param" ++) . show) [1 .. ptsl]
     let exp' = foldl HsApp exp extra
-    expr <- translateHaskellExprToCPlusPlus exp'
-    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts extraps)) $ Block [Return expr]
+    expr <- withTypes (zip extraps pts) $ translateHaskellExprToCPlusPlus exp'
+    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts extraps) []) $ Block [Return expr]
     return [if L.null vns
         then NoTemplate fundef
         else Template vns fundef ]
@@ -396,19 +418,20 @@ tranlateHaskellGroupsToCPlusPlus (n, [match@(HsMatch _ _ (HsPVar _ : _) (HsUnGua
     let extra = map (HsVar . UnQual . HsIdent . ("_param" ++) . show) [psl + 1 .. ptsl]
     let extraps = map ( ("_param" ++) . show) [psl + 1 .. ptsl]
     let exp' = foldl HsApp exp extra
-    expr <- translateHaskellExprToCPlusPlus exp'
-    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts (ps++extraps))) $ Block [Return expr]
+    let ps' = ps++extraps
+    expr <- withTypes (zip ps' pts) $ translateHaskellExprToCPlusPlus exp'
+    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts ps') []) $ Block [Return expr]
     return [if L.null vns
         then NoTemplate fundef
         else Template vns fundef ]
 tranlateHaskellGroupsToCPlusPlus (n, matches) = do
     typedic <- lift get
-    stmts <- translateHaskellAltsToLambdaCPlusPlus matches
     let ps = extractParams (head matches)
     let fn = extractName n
     let TFun vns rt pts = typedic ! fn
-    let expr = App (Con "boost::apply_visitor") (stmts ++ [Var (head ps)])
-    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts ps)) $ Block [Return expr]
+    stmts <- translateHaskellAltsToCPlusPlus rt matches
+    let expr =  (App (Con "boost::apply_visitor") [App (Con "visitor") [], Var (head ps)])
+    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts ps) []) $ Block [Def $ NoTemplate stmts, Return expr]
     return [if L.null vns
         then NoTemplate fundef
         else Template vns fundef ]
@@ -430,12 +453,29 @@ tranlateHaskellConsDeclsToCPlusPlus2 name fields2 =
     let params = map extractConstructorParam fields2
         inits = map extractConstructorInit fields2
         ctor = Ctor "explicit" name params inits (Block []) in
-        NoTemplate (StructDef name (ctor : map tranlateHaskellRecFieldDeclsToCPlusPlus fields2))
+        NoTemplate (StructDef name [] (ctor : map tranlateHaskellRecFieldDeclsToCPlusPlus fields2))
 
 tranlateHaskellRecFieldDeclsToCPlusPlus (i, HsUnBangedTy ty) =
     Field (tranlateHaskellTypeToCPlusPlus ty) (mname i)
 
-evalTran x = evalState (evalStateT x empty ) empty
+vars v@ (TVar _) = [v]
+vars (TFun vs _ _) = vs
+vars (TApp t1 t2) = foldl L.union [] (map vars t2)
+vars (TCon _) = []
+
+infixl 4 @@
+infixr 3 -->
+(-->) t (TFun vs rt pts) =
+    TFun (vars t `L.union` vs) rt (t:pts)
+
+(-->) t s = TFun (vars t `L.union` vars s) s [t]
+list e = "std::vector" @@ [e]
+
+evalTran x = evalState (evalStateT x empty ) $ fromList [
+    ("chaskell::add",  TCon "int" --> TCon "int" --> TCon "int"),
+    ("map", (TVar "B" --> TVar "A") --> list (TVar "A") --> list (TVar "B")),
+    ("foldl", (TVar "B" --> TVar "A" --> TVar "B") --> TVar "B" --> list (TVar "A") --> TVar "B"),
+    ("foldl1", (TVar "A" --> TVar "A" --> TVar "A") --> list (TVar "A") --> TVar "A")]
 
 main :: IO ()
 main = do
