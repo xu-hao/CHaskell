@@ -11,7 +11,6 @@ map :: (a->b) -> [a] -> [b]
 foldl :: (b->a->b)-> b-> [a]->b
 foldl1 :: (a->a->a) -> [a] -> a
 
-
 intercalate :: [a] -> [[a]] -> [a]
 intercalate sep = foldl1 (\a b -> a ++ sep ++ b)
 

@@ -350,6 +350,16 @@ tranlateHaskellDeclsToHPlusPlus (HsTypeSig _ [n] (HsQualType _ ty)) = do
         then NoTemplate fundef
         else Template vns fundef
         ]
+tranlateHaskellDeclsToHPlusPlus (HsForeignImport _ _ _ _ n ty) = do
+    typedic <- lift get
+    let fn = extractName n
+    let ft@(TFun vns rt pt) = tranlateHaskellTypeToCPlusPlus ty
+    lift $ put $ insert fn ft typedic
+    let fundef = FuncProto $ FuncSig rt fn $ map (\ty -> Param ty "") pt
+    return [if L.null vns
+        then NoTemplate fundef
+        else Template vns fundef
+        ]
 tranlateHaskellDeclsToHPlusPlus (HsFunBind _) = return []
 tranlateHaskellDeclsToHPlusPlus (HsPatBind _ _ _ _) = return []
 
