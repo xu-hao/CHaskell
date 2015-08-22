@@ -18,8 +18,12 @@ namespace chaskell {
   std::vector<T> map(F a, const std::vector<T>& b) {
   }
 
-  template<F>
-  std::string map(F a, const std::string& b) {
-  }
+  template<F, B, A>
+  B foldl(F f, B init, const std::vector<A> &l) {
 
+  }
+  template<F, A>
+  A foldl1(F f, const std::vector<A> &l) {
+
+  }
 }

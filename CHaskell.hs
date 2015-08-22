@@ -1,17 +1,23 @@
 module CHaskell where
 
+import Prelude hiding (lookup)
 import Language.Haskell.Parser
 import Language.Haskell.Syntax
 import System.Environment
 import Control.Monad.State
 import Data.List (intercalate, sortBy)
-import Data.Map hiding (map, foldl)
+import qualified Data.List as L
+import Data.Map hiding (map, foldl, (!))
 import Control.Applicative ((<$>),(<*>))
+import Data.Maybe
+
+(!) m k = fromMaybe (error $ show k) $ lookup k m
 
 data Type = TAuto
           | TCon String
           | TVar String
           | TApp String [Type]
+          | TFun [Type] Type [Type]
 data Param = Param Type String
 data FuncSig = FuncSig Type String [Param]
 data Expr = This
@@ -52,6 +58,10 @@ instance ShowI Type where
     showI (TApp t targs) = do
         targss <- mapM showI targs
         return $ t ++ "<" ++ intercalate "," targss ++ " >"
+    showI (TFun vns rt pts) = do
+        targss <- mapM showI pts
+        rts <- showI rt
+        return $ "std::function<"++rts ++ "("++ intercalate "," targss ++ ")>"
 instance ShowI Param where
     showI (Param t n) = do
         ts <- showI t
@@ -164,15 +174,29 @@ instance ShowI Template where
         return $ i ++ "template <" ++ intercalate "," tvss ++ " >\n" ++ defs
     showI (NoTemplate def) = showI def
 
+showII a = evalState (showI a) ""
+
 pname = ("_" ++)
 
 mname = (++ "_")
+
+extractTVarNames (HsTyVar n) = [extractName n]
+extractTVarNames (HsTyCon _) = []
+extractTVarNames (HsTyApp ty1 ty2) = extractTVarNames ty1 `L.union` extractTVarNames ty2
+extractTVarNames (HsTyFun ty1 ty2) = extractTVarNames ty1 `L.union` extractTVarNames ty2
 
 tranlateHaskellTypeToCPlusPlus (HsTyVar (HsIdent name)) = TVar name
 tranlateHaskellTypeToCPlusPlus (HsTyCon (UnQual (HsIdent name))) | name == "String" = TCon "std::string"
                                                                  | name == "Int" = TCon "int"
                                                                  | otherwise = TCon name
 tranlateHaskellTypeToCPlusPlus (HsTyApp (HsTyCon (Special HsListCon)) ty) = TApp "std::vector" [tranlateHaskellTypeToCPlusPlus ty]
+tranlateHaskellTypeToCPlusPlus ty@(HsTyFun ty1 ty2) = transTFun ty2 [tranlateHaskellTypeToCPlusPlus ty1] where
+    transTFun (HsTyFun exp1 exp2) args =
+        let expr1 = tranlateHaskellTypeToCPlusPlus exp1 in
+            transTFun exp2 (args ++ [expr1])
+    transTFun exp1 args =
+        let expr = tranlateHaskellTypeToCPlusPlus exp1 in
+            TFun (map TVar $ extractTVarNames ty) expr args
 tranlateHaskellTypeToCPlusPlus ty = error (show ty)
 
 translateHaskellExprToCPlusPlus :: HsExp -> TranEnv Expr
@@ -187,9 +211,19 @@ translateHaskellExprToCPlusPlus (HsApp exp1 exp2) = do
       transApp (HsApp exp1 exp2) args = do
           expr2 <- translateHaskellExprToCPlusPlus exp2
           transApp exp1 (expr2 : args)
-      transApp exp1 args =
-          App <$> translateHaskellExprToCPlusPlus exp1 <*> return args
-translateHaskellExprToCPlusPlus (HsLambda _ [HsPVar n] exp) = Lam [extractName n] <$> Block <$> sequence [Return <$> translateHaskellExprToCPlusPlus exp]
+      transApp exp1 args = do
+          typedic <- lift get
+          expr <- translateHaskellExprToCPlusPlus exp1
+          let n = case expr of
+                  Var n -> n
+                  Con n -> n
+          let ft@(TFun _ rt pts) = typedic ! n
+          if length pts /= length args
+              then error "partial application"
+              else return $ App expr args
+translateHaskellExprToCPlusPlus (HsLambda _ pats exp) = do
+    let vars = map (extractName . (\(HsPVar n) -> n)) pats
+    Lam vars <$> Block <$> sequence [Return <$> translateHaskellExprToCPlusPlus exp]
 translateHaskellExprToCPlusPlus (HsLet decls exp) = error "let is not supported"
 translateHaskellExprToCPlusPlus (HsIf exp1 exp2 exp3) = If <$> translateHaskellExprToCPlusPlus exp1 <*> translateHaskellExprToCPlusPlus exp2 <*> translateHaskellExprToCPlusPlus exp3
 translateHaskellExprToCPlusPlus (HsCase exp alts) = do
@@ -200,9 +234,9 @@ translateHaskellExprToCPlusPlus (HsDo stmts) = error "not supported"
 translateHaskellExprToCPlusPlus (HsTuple exps) = App (Con "std::make_tuple") <$> mapM translateHaskellExprToCPlusPlus exps
 translateHaskellExprToCPlusPlus (HsList exps) = InitApp "std::vector" <$> mapM translateHaskellExprToCPlusPlus exps
 translateHaskellExprToCPlusPlus (HsParen exp) = translateHaskellExprToCPlusPlus exp
-translateHaskellExprToCPlusPlus (_) = error "not supported"
+translateHaskellExprToCPlusPlus c = error $ "not supported " ++ show c
 type DataDic = Map String (Int, [String])
-type TypeDic = Map String (Type, [Type])
+type TypeDic = Map String Type
 type TranEnv = StateT DataDic (State TypeDic)
 
 translateHaskellAltsToLambdaCPlusPlus :: Pattern p => [p] -> TranEnv [Expr]
@@ -239,14 +273,19 @@ class Pattern a where
     extractPat :: a -> HsPat
     extractExp :: a -> HsExp
 instance Pattern HsMatch where
-    extractCons (HsMatch _ _ [HsPApp n _] _ _) = extractQName n
-    extractPat (HsMatch _ _ [pat] _ _) = pat
+    extractCons (HsMatch _ _ (HsPApp n _ : _) _ _) = extractQName n
+    extractPat (HsMatch _ _ (pat : _) _ _) = pat
     extractExp (HsMatch _ _ _ (HsUnGuardedRhs exp) _) = exp
 instance Pattern HsAlt where
     extractCons (HsAlt _ (HsPApp n _) _ _) = extractQName n
     extractPat (HsAlt _ pat _ _) = pat
     extractExp (HsAlt _ _ (HsUnGuardedAlt exp) _) = exp
 
+extractParams (HsMatch _ _ pats _ _) = zipWith extractParamFromPat pats  [1..length pats]
+
+extractParamFromPat ((HsPVar n)) i = (extractName n)
+extractParamFromPat ((HsPApp _ _)) i = ("_param" ++ show i)
+extractParamFromPat ((HsPParen pat)) i = extractParamFromPat (pat) i
 
 extractQOp (HsQVarOp name) = extractQName name
 extractQOp (HsQConOp name) = extractQName name
@@ -304,11 +343,29 @@ tranlateHaskellDeclsToHPlusPlus (HsDataDecl _ _ (HsIdent name) tvars constructor
 tranlateHaskellDeclsToHPlusPlus (HsTypeSig _ [n] (HsQualType _ ty)) = do
     typedic <- lift get
     let fn = extractName n
-    let tyt@(rt, pt) = tranlateHaskellFuncTypeToCPlusPlus ty
-    lift $ put $ insert fn tyt typedic
-    return [NoTemplate $ FuncProto $ FuncSig rt fn $ map (\ty -> Param ty "") pt ]
+    let ft@(TFun vns rt pt) = tranlateHaskellTypeToCPlusPlus ty
+    lift $ put $ insert fn ft typedic
+    let fundef = FuncProto $ FuncSig rt fn $ map (\ty -> Param ty "") pt
+    return [if L.null vns
+        then NoTemplate fundef
+        else Template vns fundef
+        ]
 tranlateHaskellDeclsToHPlusPlus (HsFunBind matches) = return []
+tranlateHaskellDeclsToHPlusPlus (HsPatBind _ _ _ _) = return []
 
+tranlateHaskellDeclsToCPlusPlus (HsPatBind _ (HsPVar n) (HsUnGuardedRhs exp) _) = do
+    typedic <- lift get
+    let fn = extractName n
+    let TFun vns rt pts = typedic ! fn
+    let ptsl = length pts
+    let extra = map (HsVar . UnQual . HsIdent . ("_param" ++) . show) [1 .. ptsl]
+    let extraps = map ( ("_param" ++) . show) [1 .. ptsl]
+    let exp' = foldl HsApp exp extra
+    expr <- translateHaskellExprToCPlusPlus exp'
+    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts extraps)) $ Block [Return expr]
+    return [if L.null vns
+        then NoTemplate fundef
+        else Template vns fundef ]
 tranlateHaskellDeclsToCPlusPlus (HsFunBind matches) = do
     let curr0@(HsMatch _ currn0 _ _ _ ) = head matches
     let (curr, currn, groups) = foldl (\(curr,currn, prev) match@(HsMatch _ n _ _ _ )->
@@ -318,22 +375,33 @@ tranlateHaskellDeclsToCPlusPlus (HsFunBind matches) = do
     concat <$> mapM tranlateHaskellGroupsToCPlusPlus (groups++[(currn, curr) ])
 tranlateHaskellDeclsToCPlusPlus _ = return []
 
-tranlateHaskellFuncTypeToCPlusPlus :: HsType ->  (Type, [Type])
-tranlateHaskellFuncTypeToCPlusPlus (HsTyFun ty1 ty2) =
-    let ty1t = tranlateHaskellTypeToCPlusPlus ty1
-        (rtt, ptt) = tranlateHaskellFuncTypeToCPlusPlus ty2 in
-    (rtt, ty1t : ptt)
-tranlateHaskellFuncTypeToCPlusPlus a = (tranlateHaskellTypeToCPlusPlus a, [])
-
 tranlateHaskellGroupsToCPlusPlus :: (HsName, [HsMatch]) -> TranEnv [Template]
+tranlateHaskellGroupsToCPlusPlus (n, [match@(HsMatch _ _ (HsPVar _ : _) (HsUnGuardedRhs exp) _)]) = do
+    typedic <- lift get
+    let ps = extractParams match
+    let fn = extractName n
+    let TFun vns rt pts = typedic ! fn
+    let psl = length ps
+    let ptsl = length pts
+    let extra = map (HsVar . UnQual . HsIdent . ("_param" ++) . show) [psl + 1 .. ptsl]
+    let extraps = map ( ("_param" ++) . show) [psl + 1 .. ptsl]
+    let exp' = foldl HsApp exp extra
+    expr <- translateHaskellExprToCPlusPlus exp'
+    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts (ps++extraps))) $ Block [Return expr]
+    return [if L.null vns
+        then NoTemplate fundef
+        else Template vns fundef ]
 tranlateHaskellGroupsToCPlusPlus (n, matches) = do
     typedic <- lift get
     stmts <- translateHaskellAltsToLambdaCPlusPlus matches
-    let exp = Var "_param"
+    let ps = extractParams (head matches)
     let fn = extractName n
-    let (rt , [pt]) = typedic ! fn
-    let expr = App (Con "boost::apply_visitor") (stmts ++ [exp])
-    return [NoTemplate $ FuncDef (FuncSig rt fn [Param pt "_param"]) $ Block [Return expr]]
+    let TFun vns rt pts = typedic ! fn
+    let expr = App (Con "boost::apply_visitor") (stmts ++ [Var (head ps)])
+    let fundef = FuncDef (FuncSig rt fn (zipWith Param pts ps)) $ Block [Return expr]
+    return [if L.null vns
+        then NoTemplate fundef
+        else Template vns fundef ]
 
 
 tranlateHaskellConsDeclsToFwdDeclsCPlusPlus (HsRecDecl _ (HsIdent name) _) =
