@@ -350,7 +350,7 @@ tranlateHaskellDeclsToHPlusPlus (HsTypeSig _ [n] (HsQualType _ ty)) = do
         then NoTemplate fundef
         else Template vns fundef
         ]
-tranlateHaskellDeclsToHPlusPlus (HsFunBind matches) = return []
+tranlateHaskellDeclsToHPlusPlus (HsFunBind _) = return []
 tranlateHaskellDeclsToHPlusPlus (HsPatBind _ _ _ _) = return []
 
 tranlateHaskellDeclsToCPlusPlus (HsPatBind _ (HsPVar n) (HsUnGuardedRhs exp) _) = do
