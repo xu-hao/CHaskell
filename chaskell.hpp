@@ -9,11 +9,6 @@ namespace chaskell {
 
   std::string append(const std::string& a, const std::string& b);
 
-  template<T>
-  std::vector<T> intercalate(T& a, const std::vector<std::vector<T>>& b) {
-  }
-
-  std::string intercalate(const T& a, const T& b);
   template<F, T>
   std::vector<T> map(F a, const std::vector<T>& b) {
   }
