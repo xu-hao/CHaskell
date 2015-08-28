@@ -8,7 +8,7 @@ data ExprCon = VarCon String | BinOpCon ExprCon String ExprCon | ListOpCon Strin
 
 
 intercalate :: [a] -> [[a]] -> [a]
-intercalate sep = foldl1 ((\a b -> a ++ sep ++ b) :: [a] -> [a] -> [a])
+intercalate sep = foldl1 (\a b -> a ++ sep ++ b)
 
 interint :: [Int] -> [[Int]] -> [Int]
 interint sep l = intercalate sep l
@@ -17,7 +17,7 @@ sum :: [Int] -> Int
 sum = foldl (+) 0
 
 concat :: [[a]] -> [a]
-concat = foldl ((++) :: [a] -> [a] -> [a]) ([] :: [a])
+concat = foldl (++) []
 
 s :: Expr -> String
 s (Var v) = v
@@ -48,11 +48,15 @@ opop (BinOp a b c) = case a of
       (ListOp _ _) -> 0
 opop (ListOp a b) = 0
 
+multioccur :: Expr -> String
+multioccur (Var v) = v ++ v
+multioccur (BinOp a b c) = ""
+multioccur (ListOp a b) = ""
+
 letcase :: Expr -> Int
 letcase (Var v) = 0
 letcase (BinOp a b c) =
-  let x :: Int
-      x = case a of
+  let x = case a of
           (Var v) -> 0
           (BinOp a b c) -> 1
           (ListOp a b) -> 0 in
@@ -70,8 +74,7 @@ g x =
 
 letfunc :: Int -> Int
 letfunc x =
-    let f :: Int -> Int
-        f x = x in
+    let f x = x in
         f x
 
 append2 :: [Int] -> [Int]

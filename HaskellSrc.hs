@@ -1,12 +1,16 @@
+{-# LANGUAGE MultiParamTypeClasses, FlexibleInstances, FlexibleContexts #-}
+
 module HaskellSrc where
 
-import CPlusPlus
+import CPlusPlus hiding (IntL, StrL)
+import Mapping
 
 import Prelude hiding (lookup, exp)
 import Language.Haskell.Syntax
 import qualified Data.List as L
 import Data.List ((\\))
-import Data.Map hiding (map, foldl, (!), (\\))
+import Data.Tree
+import Data.Map hiding (map, foldl, (\\))
 import Control.Applicative ((<$>), (<*>))
 import Data.Maybe
 
@@ -65,7 +69,7 @@ extractConstructorNameAndFields (HsConDecl _ n fields) = (extractName n, zipWith
 
 extractFieldNameAndType (HsIdent name : _, (HsUnBangedTy ty)) = (name, ty)
 
-extractConstructorInit (name, _) = Init (mname name) (App (Var "std::move") [Var (pname name)])
+extractConstructorInit (name, ty) = Init (mname name) (Var (pname name) ty)
 
 -- transform
 findPApp :: [HsPat] -> Maybe Int
@@ -97,33 +101,36 @@ transformPatBindToAlts bind@(HsPatBind srcloc (HsPVar fn) rhs decls) =
 class FreeVars a where
     freeVars :: a -> [String]
 
-instance FreeVars HsDecl where
-    freeVars (HsPatBind _ _ (HsUnGuardedRhs exp) _) = freeVars exp
-    freeVars (HsTypeSig _ _ _) = []
+instance FreeVars Decl where
+    freeVars (BindD _ exp) = freeVars exp
+    freeVars (TypeSigD _ _) = []
+    freeVars (DataD _ _ _) = []
 
-instance FreeVars HsExp where
-    freeVars (HsLit _) = []
-    freeVars (HsCon _) = []
-    freeVars (HsVar n) = [extractQName n]
-    freeVars (HsParen exp) = freeVars exp
-    freeVars (HsLambda _ pats exp) = freeVars exp \\ freeVars pats
-    freeVars (HsApp exp1 exp2) = freeVars exp1 `L.union` freeVars exp2
-    freeVars (HsLet decls exp) = freeVars decls `L.union` freeVars exp \\ boundVars decls
-    freeVars (HsCase exp alts) = freeVars exp `L.union` freeVars alts
-    freeVars (HsIf exp1 exp2 exp3) = freeVars exp1 `L.union` freeVars exp2 `L.union` freeVars exp3
-    freeVars (HsInfixApp exp1 _ exp2) = freeVars exp1 `L.union` freeVars exp2
-    freeVars (HsExpTypeSig _ exp _) = freeVars exp
-    freeVars (HsTuple exps) = freeVars exps
-    freeVars (HsList exps) = freeVars exps
+instance FreeVars TypeExp where
+    freeVars (_, exp) = freeVars exp
 
-instance FreeVars HsAlt where
-    freeVars (HsAlt _ pats (HsUnGuardedAlt exp) _) = freeVars exp \\ freeVars pats
+instance FreeVars Exp where
+    freeVars (LitE _) = []
+    freeVars (VarE n) = [n]
+    freeVars (LamE n exp) = freeVars exp \\ [n]
+    freeVars (AppE exp1 exp2) = freeVars exp1 `L.union` freeVars exp2
+    freeVars (LetE decls exp) = freeVars decls `L.union` freeVars exp \\ boundVars decls
+    freeVars (CaseE exp alts) = freeVars exp `L.union` freeVars alts
+    freeVars (IfE exp1 exp2 exp3) = freeVars exp1 `L.union` freeVars exp2 `L.union` freeVars exp3
+    freeVars (TypeSigE exp _) = freeVars exp
+    freeVars (TupleE exps) = freeVars exps
+    freeVars (ListE exps) = freeVars exps
 
-instance FreeVars HsPat where
-    freeVars (HsPApp _ pats) = freeVars pats
-    freeVars (HsPVar n) = [extractName n]
-    freeVars (HsPParen pat) = freeVars pat
-    freeVars (HsPWildCard) = []
+instance FreeVars Alt where
+    freeVars (Alt pat exp) = freeVars exp \\ freeVars pat
+
+instance FreeVars (String, Type, Pat) where
+    freeVars (_, _, pat) = freeVars pat
+
+instance FreeVars Pat where
+    freeVars (AppP _ pats) = freeVars pats
+    freeVars (VarP n) = [n]
+    freeVars WildCardP = []
 
 instance FreeVars a => FreeVars [a] where
     freeVars = foldl (\fv a-> fv `L.union` freeVars a) []
@@ -131,10 +138,140 @@ instance FreeVars a => FreeVars [a] where
 class BoundVars a where
     boundVars :: a -> [String]
 
-instance BoundVars HsDecl where
-    boundVars (HsPatBind _ pat _ _) = freeVars pat
-    boundVars (HsTypeSig _ _ _) = []
-    boundVars decl = error $ "unsupported " ++ show decl
+instance BoundVars Decl where
+    boundVars (BindD n _) = [n]
+    boundVars (TypeSigD _ _) = []
+    boundVars (DataD _ _ cons) = map (\(ConD n _) -> n) cons
 
 instance BoundVars a => BoundVars [a] where
     boundVars = foldl (\fv a-> fv `L.union` boundVars a) []
+
+declsVarmap :: [Decl] -> Map String Type
+declsVarmap = foldl (\map decl ->
+    case decl of
+        (BindD n (ty, _)) -> insert n ty map
+        _ -> map) empty
+data Lit = StrL String
+         | IntL Int
+
+type TypeExp = (Type, Exp)
+
+data Exp = LitE Lit
+             | VarE String
+             | LamE String TypeExp
+             | AppE TypeExp TypeExp
+             | LetE [Decl] TypeExp
+             | CaseE TypeExp [Alt]
+             | IfE TypeExp TypeExp TypeExp
+             | TypeSigE TypeExp Type
+             | TupleE [TypeExp]
+             | ListE [TypeExp]
+
+data Decl = TypeSigD String Type
+              | BindD String TypeExp
+              | DataD String [String] [ConD]
+
+data ConD = ConD String [(String, Type)]
+
+data Alt = Alt Pat TypeExp
+
+data Pat = VarP String
+         | AppP String [(String, Type, Pat)]
+         | WildCardP
+
+class Convert a b where
+    convert :: a -> b
+
+u = TAuto
+
+instance Convert HsLiteral Lit where
+  convert (HsInt i) = IntL (fromIntegral i)
+  convert (HsString s) = StrL s
+
+lam :: Pat -> Exp -> Exp
+lam (VarP v) e = LamE v (u, e)
+lam (WildCardP) e = LamE "__dummy__" (u, e)
+lam pat e = LamE "__param__" (u, CaseE (u, VarE "__param__") [Alt pat (u, e)])
+
+lams :: [Pat] -> [TypeExp] -> [TypeExp]
+lams (VarP v : _) es = map (\e -> (u, LamE v e)) es
+lams (WildCardP : _) es = map (\e -> (u, LamE "__dummy__" e)) es
+lams pats es = [(u, LamE "__param__" (u, CaseE (u, VarE "__param__") (zipWith Alt pats es)))]
+
+app :: Exp -> Exp -> Exp
+app e e' = AppE (u, e) (u, e')
+
+-- types
+instance Convert HsConDecl ConD where
+  convert (HsRecDecl _ name fields) =
+      ConD (extractName name) (convert fields)
+  convert (HsConDecl _ name fields) =
+      ConD (extractName name) (convert (zip [1..length fields] fields))
+
+instance Convert ([HsName], HsBangType) (String, Type) where
+  convert ([n], HsUnBangedTy ty) = (extractName n, convert ty)
+
+instance Convert (Int, HsBangType) (String, Type) where
+  convert (i, HsUnBangedTy ty) = ("param" ++ show i, convert ty)
+
+instance Convert HsType Type where
+  convert (HsTyVar (HsIdent name)) = TVar name
+  convert (HsTyCon (UnQual (HsIdent name))) = fromMaybe (TCon name) (lookup name primtypetable)
+  convert (HsTyApp (HsTyCon (Special HsListCon)) ty) = TApp "std::vector" [convert ty]
+  convert (HsTyApp (HsTyCon (Special (HsTupleCon _))) ty) = TApp "std::tuple" [convert ty]
+  convert (HsTyFun ty1 ty2) = convert ty1 --> convert ty2
+  convert ty = error (show ty)
+
+instance Convert a b => Convert [a] [b] where
+  convert = map convert
+
+instance Convert a Exp => Convert a TypeExp where
+  convert a = (u, convert a)
+
+instance Convert HsQOp Exp where
+  convert op = VarE $ extractQOp op
+
+instance Convert HsExp Exp where
+  convert (HsLit l) =  LitE (convert l)
+  convert (HsCon n) =  VarE (extractQName n)
+  convert (HsVar n) =  VarE (extractQName n)
+  convert (HsParen exp) = convert exp
+  convert (HsLambda _ pats exp) = L.foldr lam (convert exp) (convert pats)
+  convert (HsApp exp1 exp2) = AppE (convert exp1) (convert exp2)
+  convert (HsLet decls exp) = LetE (convert decls) (convert exp)
+  convert (HsCase exp alts) =  CaseE (convert exp) (convert alts)
+  convert (HsIf exp1 exp2 exp3) = IfE (convert exp1) (convert exp2) (convert exp3)
+  convert (HsInfixApp exp1 op exp2) = app (app (convert op) (convert exp1)) (convert exp2)
+  convert (HsExpTypeSig _ exp (HsQualType _ ty)) = TypeSigE (convert exp) (convert ty)
+  convert (HsTuple exps) = TupleE (convert exps)
+  convert (HsList exps) =  ListE (convert exps)
+
+instance Convert HsPat (String, Type, Pat) where
+  convert pat = ("", u, convert pat)
+
+instance Convert HsPat Pat where
+  convert (HsPApp n pats) = AppP (extractQName n) (convert pats)
+  convert (HsPVar n) =  VarP (extractName n)
+  convert (HsPParen pat) = convert pat
+  convert (HsPWildCard) = WildCardP
+
+instance Convert HsAlt Alt where
+  convert (HsAlt _ pat (HsUnGuardedAlt exp) _) = Alt (convert pat) (convert exp)
+
+instance Convert HsMatch (String, [Pat], TypeExp) where
+  convert (HsMatch _ n pats (HsUnGuardedRhs exp) _) = (extractName n, convert pats, convert exp)
+
+patBind :: Pat -> Exp -> Decl
+patBind (VarP n) e = BindD n (u, e)
+
+funBind :: [(String, [Pat], TypeExp)] -> Decl
+funBind matches@((n, pats, exp):_) =
+    let patsst = L.transpose $ map (\(_, pats, _) -> pats) matches in
+        BindD n (head (L.foldr lams (map (\(_, _, exp) -> exp) matches) patsst))
+
+instance Convert HsDecl Decl where
+  convert (HsPatBind _ pat (HsUnGuardedRhs exp) _) = patBind (convert pat) (convert exp)
+  convert (HsTypeSig _ [n] (HsQualType _ ty)) = TypeSigD (extractName n) (convert ty)
+  convert (HsFunBind matches) = funBind (convert matches)
+  convert (HsDataDecl _ _ n ns cons _) = DataD (extractName n) (map extractName ns) (convert cons)
+  convert decl = error $ "unsupported " ++ show decl

@@ -5,10 +5,6 @@
 #include <algorithm>
 #include <boost/variant.hpp>
 
-std::string intercalate(const std::string& a, const std::vector<std::string>& b);
-
-std::string concat (const std::vector<std::string>& a);
-
 template<typename A, typename T>
 std::vector<T> map(const std::function<T(const A&)>& a, const std::vector<A>& b) {
     std::vector<T> v;
@@ -17,13 +13,13 @@ std::vector<T> map(const std::function<T(const A&)>& a, const std::vector<A>& b)
 }
 
 template<typename B, typename A>
-B foldl(const std::function<B(const B&, const B&)> f, const B& init, const std::vector<A>& l) {
-    return std::accumulate(l.begin(), l.end(), init, f);
+B foldl(const std::function<std::function<B(const A&)>(const B&)> f, const B& init, const std::vector<A>& l) {
+    return std::accumulate(l.begin(), l.end(), init, [&f](auto&& a, auto&& b){return f(a)(b);});
 }
 
 template<typename A>
-A foldl1(const std::function<A(const A&, const A&)>& f, const std::vector<A>& l) {
-    return std::accumulate(l.begin()++, l.end(), *l.begin(), f);
+A foldl1(const std::function<std::function<A(const A&)>(const A&)>& f, const std::vector<A>& l) {
+    return std::accumulate(l.begin()++, l.end(), *l.begin(), [&f](auto&& a, auto&& b){return f(a)(b);});
 }
 
 template<typename A>
@@ -34,6 +30,7 @@ std::vector<A> cons(const A&a, const std::vector<A>& b) {
 }
 
 namespace chaskell {
+  std::vector<char> vectorchar(const char *string);
 
   template <typename T>
   std::function<T> function(const T &a) {
@@ -46,7 +43,7 @@ namespace chaskell {
       v.insert(v.begin(), b.begin(), b.end());
       return v;
   }
-
   std::string append(const std::string& a, const std::string& b);
+
 }
 #endif
